@@ -1,142 +1,181 @@
-# su26-ai301-contribution
-# Contribution 1: Add Update Download Status to UI
+# Contribution 1: Fix async-await-in-loop Performance Issue
 
 **Contribution Number:** 1
 **Student:** Thomas Lavadinho
-**Issue:** https://github.com/session-foundation/session-desktop/issues/904
-**Status:** Phase I Complete
-
----
+**Issue:** [wso2/product-is#27874](https://github.com/wso2/product-is/issues/27874)
+**Status:** Phase II Complete
 
 ## Why I Chose This Issue
 
-I chose this issue because it seemed like a good first contribution that is pretty specific and not too huge. I wanted something where I could actually understand what is going on without needing to learn the entire codebase first.
-
-It also seemed interesting because it involves improving the user experience. Right now the app updates in the background but the user does not really know if anything is happening. I also thought it would be a good way to learn more about Electron apps and how desktop applications handle updates.
-
----
+I switched to this issue from a Session Desktop one because this one is way more
+approachable. The React Doctor tool already flagged exactly which files and line numbers
+have the problem, so I didn't have to go hunting through a huge codebase trying to
+figure out what was wrong. The fix pattern is also clear — it's the same change in
+14 places. And it's a real performance improvement, not just a style thing, which made
+it feel worth doing.
 
 ## Understanding the Issue
 
-### Problem Description
+**Problem Description:**
+In 14 files across the identity-apps repo, there are `await` calls sitting inside
+`for...of` loops. This means every async API call has to fully finish before the next
+one even starts. If all the calls are independent (which they are here), that's just
+wasted time.
 
-When a user updates Session Desktop, the update downloads in the background, but there is no message or progress shown in the UI. This can make it seem like nothing is happening.
+**Expected Behavior:**
+Independent async calls should all fire at the same time using `Promise.all`, so the
+total wait time is just however long the slowest single call takes instead of adding
+them all up.
 
-### Expected Behavior
+**Current Behavior:**
+Every call waits for the one before it. If each call takes 200ms and there are 5 of
+them, you're waiting 1000ms instead of ~200ms.
 
-The app should show some kind of notice or indicator that an update is downloading.
-
-### Current Behavior
-
-The update downloads silently in the background after clicking the update button.
-
-### Affected Components
-
-Based on the issue discussion, this likely involves:
-
-* Update handling logic (`electron-updater`)
-* UI components related to update notifications
-* Possibly communication between the updater and frontend state
-
----
+**Affected Components:**
+14 files in the `features/` directory of `wso2/identity-apps`:
+- `features/admin.administrators.v1/wizard/add-administrator-wizard.tsx:279`
+- `features/admin.connections.v1/components/edit/settings/authenticator-settings.tsx:442`
+- `features/admin.connections.v1/components/edit/settings/outbound-provisioning-settings.tsx:239`
+- `features/admin.console-settings.v1/hooks/use-enterprise-login-config.ts:230`
+- `features/admin.console-settings.v1/hooks/use-enterprise-login-config.ts:547`
+- `features/admin.copilot.v1/api/copilot-api.ts:233`
+- `features/admin.copilot.v1/store/actions/copilot.ts:526`
+- `features/admin.flow-builder-core.v1/api/use-resolve-custom-text-preference.ts:140`
+- `features/admin.flow-builder-core.v1/plugins/plugin-registry.ts:180`
+- `features/admin.server-configurations.v1/pages/connector-listing-page.tsx:284`
+- `features/admin.template-core.v1/hooks/use-initialize-handlers.ts:91`
+- `features/admin.template-core.v1/hooks/use-initialize-handlers.ts:114`
+- `features/admin.template-core.v1/hooks/use-submission-handlers.ts:118`
+- `features/admin.template-core.v1/hooks/use-validation-handlers.ts:114`
 
 ## Reproduction Process
 
 ### Environment Setup
 
-I forked the repository and started setting up the project locally. I installed Node.js, pnpm, Visual Studio build tools, CMake, Git LFS, and initialized submodules. I ran into some Windows setup issues related to native dependencies and build configuration, so local setup is still in progress.
+I forked `wso2/identity-apps` to `tommylava/identity-apps` and cloned it locally.
+First push attempt failed with a 403 because I had originally cloned the original repo
+directly instead of my fork — fixed that by updating the remote URL. Also had a
+connection reset on the first push which went away on retry. `pnpm install` ran fine
+(Node v24.12.0, pnpm 10.28.1, done in about 4.5 seconds).
 
 ### Steps to Reproduce
 
-1. Open Session Desktop.
-2. Get the “update available” popup.
-3. Click to download the update.
-4. Notice there is no visible UI feedback while it downloads.
+1. Clone the repo and run `pnpm install`
+2. Open any of the 14 files listed above and go to the line number
+3. You'll see `await` inside a `for...of` loop — the violation is right there in the code
+4. Run `pnpm lint` from the root to see the React Doctor rule flag each one
 
 ### Reproduction Evidence
 
-* **Commit showing reproduction:** Setup still in progress
-* **Screenshots/logs:** N/A
-* **My findings:** From the issue discussion, it seems the update works in the background but there is no visible progress shown to the user.
+The problem is visible statically, no need to run the app. Here's what it looks like
+in `add-administrator-wizard.tsx` around line 274:
 
----
+```typescript
+// this is the problem — each call waits for the previous one
+for (const roleId of roleIds) {
+    setIsSubmitting(true);
+    await updateUsersForRoleFunction(roleId, roleData)
+        .catch(...)
+        .finally(...);
+}
+```
+
+**Branch:** [tommylava/identity-apps — fix-issue-27874](https://github.com/tommylava/identity-apps/tree/fix-issue-27874)
 
 ## Solution Approach
 
 ### Analysis
 
-It looks like the updater already downloads updates, but the UI is not showing any status or progress to the user.
+The calls inside each loop are independent — none of them need the result of the
+previous one. So there's no reason to run them one at a time. The fix is to collect
+them all into a `Promise.all` so they run at the same time.
 
 ### Proposed Solution
 
-My plan is to look into how update events are handled and see if download progress can be shown somewhere in the UI, either through a small notification or status indicator.
+Replace each `for...of` loop that has `await` inside it with
+`await Promise.all(items.map(async (item: Type): Promise<void> => { ... }))`.
+Keep all the existing `.catch()` and `.finally()` handlers, just move them inside
+the map callback. This repo also has strict TypeScript conventions so I need to
+make sure the type annotations on the map callback are explicit.
 
-### Implementation Plan
+### Implementation Plan (UMPIRE)
 
-**Understand:** Figure out how updates currently work in Session Desktop.
+**Understand:**
+14 files are running async API calls one at a time inside loops when they could all
+run at the same time. The React Doctor rule `async-await-in-loop` caught all of them.
 
-**Match:** Look at maintainer comments and any existing updater-related code.
+**Match:**
+The issue description itself shows the fix pattern:
+```typescript
+// before
+for (const item of items) {
+    await someCall(item);
+}
+
+// after
+await Promise.all(items.map(async (item: ItemType): Promise<void> => {
+    await someCall(item);
+}));
+```
+The `CLAUDE.md` in the repo also requires explicit TypeScript types on all variables
+and callbacks, so I need to match that style.
 
 **Plan:**
+1. Go through each of the 14 files at the listed line numbers
+2. Replace the `for...of` loop with `Promise.all(items.map(...))`
+3. Keep all the `.catch()` and `.finally()` handlers inside the map
+4. Make sure the type on the map callback matches what the loop variable was
+5. Run `pnpm lint` to confirm no more React Doctor violations
+6. Run `pnpm typecheck` to make sure no new TypeScript errors
 
-1. Find where update downloads are handled.
-2. Look for UI components related to updates or notifications.
-3. Add a way to show download status in the UI.
-4. Test the update flow locally.
+**Implement:** Phase III — branch link:
+[fix-issue-27874](https://github.com/tommylava/identity-apps/tree/fix-issue-27874)
 
-**Implement:** Local branch created: `feature/update-download-status-ui`
+**Review:**
+- Follow the TypeScript conventions in `CLAUDE.md` (explicit types, no `any`,
+  `Promise<void>` return type on async callbacks)
+- Read `pull_request_template.md` before submitting the PR
+- Use a conventional commit message
 
-**Review:** Make sure the change is small, clean, and follows the project style.
-
-**Evaluate:** Verify the user sees some feedback when an update is downloading.
-
----
+**Evaluate:**
+- `pnpm lint` shows zero `async-await-in-loop` violations after the fix
+- `pnpm typecheck` passes with no new errors
+- Each changed file still has its `.catch()` and `.finally()` handlers intact
 
 ## Testing Strategy
 
-### Unit Tests
+**Linting:**
+Run `pnpm lint` — should show zero React Doctor violations for `async-await-in-loop`
+after the fix.
 
-* [ ] Update status appears when download starts
-* [ ] UI updates correctly during download
-* [ ] Status disappears after completion
+**Type checking:**
+Run `pnpm typecheck` — should pass with no new TypeScript errors introduced.
 
-### Integration Tests
-
-* [ ] Verify update events reach the UI
-* [ ] Test update flow end-to-end
-
-### Manual Testing
-
-Try triggering an update and confirm the UI shows that the download is happening.
-
----
+**Manual review:**
+Go through each changed file and confirm the error handling (`.catch()` blocks) and
+cleanup (`.finally()` blocks) are still there and working correctly.
 
 ## Pull Request
 
 **PR Link:** Not submitted yet
-
-**Status:** Phase I Complete
-
----
+**Status:** Phase II Complete — implementation starts in Phase III
 
 ## Learnings & Reflections
 
-### Technical Skills Gained
+**Technical Skills Gained:**
+Learned how to navigate a large TypeScript monorepo, how React Doctor static analysis
+works, and the difference between sequential and concurrent async patterns in JavaScript.
 
-Learned more about setting up a large open-source project and desktop app tooling.
+**Challenges Overcome:**
+Had a 403 on the first push because I cloned the original instead of my fork. Fixed
+by updating the remote URL. Also had to figure out how pnpm workspaces are structured
+in a monorepo this size.
 
-### Challenges Overcome
-
-Had to work through Windows setup issues with build tools, CMake, submodules, and dependencies.
-
-### What I'd Do Differently Next Time
-
-Probably verify setup requirements earlier before spending a lot of time troubleshooting environment issues.
-
----
+**What I'd Do Differently Next Time:**
+Fork before cloning so the remote is set up correctly from the start.
 
 ## Resources Used
 
-* GitHub issue discussion
-* Session Desktop README / CONTRIBUTING docs
-* Electron updater documentation
+- GitHub issue #27874 and React Doctor rule documentation
+- `CLAUDE.md` and `CONTRIBUTING.md` in the identity-apps repo
+- MDN docs on `Promise.all`
