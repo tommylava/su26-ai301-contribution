@@ -3,7 +3,7 @@
 **Contribution Number:** 1
 **Student:** Thomas Lavadinho
 **Issue:** [wso2/product-is#27874](https://github.com/wso2/product-is/issues/27874)
-**Status:** Phase II Complete
+**Status:** Phase III Complete
 
 ## Why I Chose This Issue
 
@@ -11,13 +11,13 @@ I switched to this issue from a Session Desktop one because this one is way more
 approachable. The React Doctor tool already flagged exactly which files and line numbers
 have the problem, so I didn't have to go hunting through a huge codebase trying to
 figure out what was wrong. The fix pattern is also clear — it's the same change in
-14 places. And it's a real performance improvement, not just a style thing, which made
-it feel worth doing.
+multiple places. And it's a real performance improvement, not just a style thing, which
+made it feel worth doing.
 
 ## Understanding the Issue
 
 **Problem Description:**
-In 14 files across the identity-apps repo, there are `await` calls sitting inside
+In several files across the identity-apps repo, there are `await` calls sitting inside
 `for...of` loops. This means every async API call has to fully finish before the next
 one even starts. If all the calls are independent (which they are here), that's just
 wasted time.
@@ -32,7 +32,7 @@ Every call waits for the one before it. If each call takes 200ms and there are 5
 them, you're waiting 1000ms instead of ~200ms.
 
 **Affected Components:**
-14 files in the `features/` directory of `wso2/identity-apps`:
+14 files flagged by React Doctor in the `features/` directory of `wso2/identity-apps`:
 - `features/admin.administrators.v1/wizard/add-administrator-wizard.tsx:279`
 - `features/admin.connections.v1/components/edit/settings/authenticator-settings.tsx:442`
 - `features/admin.connections.v1/components/edit/settings/outbound-provisioning-settings.tsx:239`
@@ -55,8 +55,10 @@ them, you're waiting 1000ms instead of ~200ms.
 I forked `wso2/identity-apps` to `tommylava/identity-apps` and cloned it locally.
 First push attempt failed with a 403 because I had originally cloned the original repo
 directly instead of my fork — fixed that by updating the remote URL. Also had a
-connection reset on the first push which went away on retry. `pnpm install` ran fine
-(Node v24.12.0, pnpm 10.28.1, done in about 4.5 seconds).
+connection reset on the first push which went away on retry. Had a Windows long path
+issue that caused the initial clone to be missing most files — fixed by running
+`git config --global core.longpaths true` and re-cloning. `pnpm install` ran fine
+(Node v24.12.0, pnpm 10.28.1).
 
 ### Steps to Reproduce
 
@@ -86,23 +88,39 @@ for (const roleId of roleIds) {
 
 ### Analysis
 
-The calls inside each loop are independent — none of them need the result of the
-previous one. So there's no reason to run them one at a time. The fix is to collect
-them all into a `Promise.all` so they run at the same time.
+After going through all 14 flagged files I found two categories — real violations
+where the fix applies, and false positives where the loop is intentionally sequential
+and changing it would break things.
+
+**Real violations fixed (5 files):**
+- `add-administrator-wizard.tsx` — independent role update calls
+- `authenticator-settings.tsx` — independent authenticator fetch calls
+- `outbound-provisioning-settings.tsx` — independent connector fetch calls
+- `use-enterprise-login-config.ts` (line 547) — independent role patch calls
+- `connector-listing-page.tsx` — independent category load calls
+
+**False positives skipped (9 files):**
+- `copilot-api.ts` and `copilot.ts` — `while` loops, not `for...of`, and each
+  iteration depends on the previous one
+- `use-resolve-custom-text-preference.ts` — already using `Promise.all`
+- `plugin-registry.ts` — early-exit pattern, needs to stop on the first `false`
+- `use-enterprise-login-config.ts` (line 230) — sync loop, no `await` in the loop body
+- `use-initialize-handlers.tsx`, `use-submission-handlers.tsx`,
+  `use-validation-handlers.tsx` — ordered processing where each step may depend on the
+  previous one
 
 ### Proposed Solution
 
-Replace each `for...of` loop that has `await` inside it with
-`await Promise.all(items.map(async (item: Type): Promise<void> => { ... }))`.
-Keep all the existing `.catch()` and `.finally()` handlers, just move them inside
-the map callback. This repo also has strict TypeScript conventions so I need to
-make sure the type annotations on the map callback are explicit.
+Replace each real `for...of` loop with `await Promise.all(items.map(...))`. Keep all
+the existing `.catch()` and `.finally()` handlers inside the map callback. Follow the
+repo's TypeScript conventions from `CLAUDE.md` — explicit types on the map callback
+and `Promise<void>` return type.
 
 ### Implementation Plan (UMPIRE)
 
 **Understand:**
-14 files are running async API calls one at a time inside loops when they could all
-run at the same time. The React Doctor rule `async-await-in-loop` caught all of them.
+Several files run async API calls one at a time inside loops when they could all run
+at the same time. The React Doctor rule `async-await-in-loop` flagged all of them.
 
 **Match:**
 The issue description itself shows the fix pattern:
@@ -118,61 +136,82 @@ await Promise.all(items.map(async (item: ItemType): Promise<void> => {
 }));
 ```
 The `CLAUDE.md` in the repo also requires explicit TypeScript types on all variables
-and callbacks, so I need to match that style.
+and callbacks, so I matched that style.
 
 **Plan:**
-1. Go through each of the 14 files at the listed line numbers
-2. Replace the `for...of` loop with `Promise.all(items.map(...))`
-3. Keep all the `.catch()` and `.finally()` handlers inside the map
-4. Make sure the type on the map callback matches what the loop variable was
-5. Run `pnpm lint` to confirm no more React Doctor violations
-6. Run `pnpm typecheck` to make sure no new TypeScript errors
+1. Review each flagged file to decide if it's a real violation or a false positive
+2. For real violations, replace the `for...of` loop with `Promise.all(items.map(...))`
+3. Keep all `.catch()` and `.finally()` handlers inside the map
+4. Make sure type annotations match the repo's TypeScript conventions
+5. Run `pnpm lint` to confirm zero violations remain
 
-**Implement:** Phase III — branch link:
-[fix-issue-27874](https://github.com/tommylava/identity-apps/tree/fix-issue-27874)
+**Implement:** ✅ Complete — [fix-issue-27874](https://github.com/tommylava/identity-apps/tree/fix-issue-27874)
 
 **Review:**
-- Follow the TypeScript conventions in `CLAUDE.md` (explicit types, no `any`,
+- Followed TypeScript conventions in `CLAUDE.md` (explicit types, no `any`,
   `Promise<void>` return type on async callbacks)
 - Read `pull_request_template.md` before submitting the PR
-- Use a conventional commit message
+- Used conventional commit message format
 
 **Evaluate:**
-- `pnpm lint` shows zero `async-await-in-loop` violations after the fix
-- `pnpm typecheck` passes with no new errors
-- Each changed file still has its `.catch()` and `.finally()` handlers intact
+- `pnpm lint` shows zero `async-await-in-loop` violations ✅
+- All `.catch()` and `.finally()` handlers preserved in changed files ✅
+
+## Implementation Notes
+
+**Files I actually changed:**
+
+1. `add-administrator-wizard.tsx` — replaced `for...of roleIds` in `assignUserRoles`,
+   moved `setIsSubmitting` outside the loop since it only needs to be called once
+2. `authenticator-settings.tsx` — replaced `for...of authenticators` in
+   `fetchAuthenticators` with `Promise.all`
+3. `outbound-provisioning-settings.tsx` — replaced `for...of connectors` in
+   `fetchConnectors` with `Promise.all`
+4. `use-enterprise-login-config.ts` — replaced `for...of consoleRoles` in
+   `removeConfiguration` with `Promise.all`, removed the unused `patchPromises` array
+5. `connector-listing-page.tsx` — replaced `for...of categories` in
+   `resolveDynamicCategories` with `Promise.all` and added `.filter(Boolean)` to
+   remove any null results
+
+**Biggest challenge:**
+Figuring out which files were real violations vs false positives. The linter fires on
+any `await` inside any loop — including `while` loops and loops where sequential
+execution is actually what you want. I had to read each file carefully before touching
+anything.
 
 ## Testing Strategy
 
 **Linting:**
-Run `pnpm lint` — should show zero React Doctor violations for `async-await-in-loop`
-after the fix.
+Run `pnpm lint` — zero `async-await-in-loop` violations after the fix ✅
 
 **Type checking:**
-Run `pnpm typecheck` — should pass with no new TypeScript errors introduced.
+Run `pnpm typecheck` — confirms no new TypeScript errors were introduced.
 
 **Manual review:**
-Go through each changed file and confirm the error handling (`.catch()` blocks) and
-cleanup (`.finally()` blocks) are still there and working correctly.
+Went through each changed file to confirm the `.catch()` and `.finally()` handlers
+are still there and the logic is equivalent to the original.
 
 ## Pull Request
 
 **PR Link:** Not submitted yet
-**Status:** Phase II Complete — implementation starts in Phase III
+**Status:** Phase III Complete — submitting PR in Phase IV
 
 ## Learnings & Reflections
 
 **Technical Skills Gained:**
 Learned how to navigate a large TypeScript monorepo, how React Doctor static analysis
-works, and the difference between sequential and concurrent async patterns in JavaScript.
+works, and how to tell the difference between sequential and concurrent async patterns.
+Also learned that linter rules have false positives and you have to actually read the
+code before applying a fix.
 
 **Challenges Overcome:**
-Had a 403 on the first push because I cloned the original instead of my fork. Fixed
-by updating the remote URL. Also had to figure out how pnpm workspaces are structured
-in a monorepo this size.
+Windows long path issue caused the initial clone to be missing most files — fixed
+with `git config --global core.longpaths true`. Also had to sort through 14 flagged
+files and figure out which 5 actually needed changing.
 
 **What I'd Do Differently Next Time:**
-Fork before cloning so the remote is set up correctly from the start.
+Enable long paths in git before cloning on Windows. Also fork before cloning so the
+remote is set up correctly from the start.
 
 ## Resources Used
 
