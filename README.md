@@ -3,7 +3,7 @@
 **Contribution Number:** 1
 **Student:** Thomas Lavadinho
 **Issue:** [wso2/product-is#27874](https://github.com/wso2/product-is/issues/27874)
-**Status:** Phase III Complete
+**Status:** Phase IV Complete
 
 ## Why I Chose This Issue
 
@@ -193,8 +193,9 @@ are still there and the logic is equivalent to the original.
 
 ## Pull Request
 
-**PR Link:** Not submitted yet
-**Status:** Phase III Complete — submitting PR in Phase IV
+**PR Link:** https://github.com/wso2/identity-apps/pull/10480
+**Status:** Phase IV Complete — PR submitted, awaiting review
+
 
 ## Learnings & Reflections
 
